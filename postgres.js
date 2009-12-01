@@ -5,6 +5,7 @@ process.mixin(require('./postgres-js/bits'));
 process.mixin(require('./postgres-js/md5'));
 var tcp = require("tcp");
 var sys = require("sys");
+var oid = require("./postgres-js/type-oids.js");
 
 exports.DEBUG = 0;
 
@@ -187,14 +188,14 @@ function parse_response(code, stream) {
 }
 
 
-exports.Connection = function (database, username, password, port) {
+exports.Connection = function (database, username, password, port, host) {
   
   // Default to port 5432
   if (port === undefined) {
     port = 5432;
   }
 
-  var connection = tcp.createConnection(port);
+  var connection = tcp.createConnection(port, host);
   var events = new process.EventEmitter();
   var query_queue = [];
   var row_description;
@@ -294,14 +295,16 @@ exports.Connection = function (database, username, password, port) {
         // TODO: investigate to see if these numbers are stable across databases or
         // if we need to dynamically pull them from the pg_types table
         switch (description.type_id) {
-        case 16: // bool
+        case oid.BOOL:
           value = value === 't';
           break;
-        case 20: // int8
-        case 21: // int2
-        case 23: // int4
+        case oid.INT8:
+        case oid.INT2:
+        case oid.INT4:
           value = parseInt(value, 10);
           break;
+        case oid.DATE: // date
+          value = parseDate(value);
         }
       }
       row[description.field] = value;
