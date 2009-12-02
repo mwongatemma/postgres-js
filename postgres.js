@@ -1,30 +1,13 @@
 /*jslint bitwise: true, eqeqeq: true, immed: true, newcap: true, nomen: true, onevar: true, plusplus: true, regexp: true, undef: true, white: true, indent: 2 */
 /*globals include md5 node exports */
 
-process.mixin(require('./postgres-js/bits'));
 process.mixin(require('./postgres-js/md5'));
+var bits = require('./postgres-js/bits');
 var tcp = require("tcp");
 var sys = require("sys");
 var oid = require("./postgres-js/type-oids.js");
 
 exports.DEBUG = 0;
-
-String.prototype.add_header = function (code) {
-  if (code === undefined) {
-    code = "";
-  }
-  return code.add_int32(this.length + 4) + this;
-};
-
-Object.prototype.map_pairs = function (func) {
-  var result = [];
-  for (var k in this) {
-    if (this.hasOwnProperty(k)) {
-      result.push(func.call(this, k, this[k]));
-    }
-  }
-  return result;
-}
 
 // http://www.postgresql.org/docs/8.3/static/protocol-message-formats.html
 var formatter = {
@@ -35,62 +18,65 @@ var formatter = {
     // TODO: implement
   },
   Describe: function (name, type) {
-    var stream = [type.charCodeAt(0)].add_cstring(name);
-    return stream.add_header('D');
+    return (new bits.Encoder('D'))
+      .push_raw_string(type)
+      .push_cstring(name);
   },
   Execute: function (name, max_rows) {
-    var stream = []
-      .add_cstring(name)
-      .add_int32(max_rows);
-    return stream.add_header('E');
+    return (new bits.Encoder('E'))
+      .push_cstring(name)
+      .push_int32(max_rows);
   },
   Flush: function () {
-    return [].add_header('H');
+    return new bits.Encoder('H');
   },
   FunctionCall: function () {
     // TODO: implement
   },
   Parse: function (name, query, var_types) {
-    var stream = []
-      .add_cstring(name)
-      .add_cstring(query)
-      .add_int16(var_types.length);
+    var builder = (new bits.Encoder('P'))
+      .push_cstring(name)
+      .push_cstring(query)
+      .push_int16(var_types.length);
     var_types.each(function (var_type) {
-      stream.add_int32(var_type);
+      builder.push_int32(var_type);
     });
-    return stream.add_header('P');
+    return builder;
   },
   PasswordMessage: function (password) {
-    return "".add_cstring(password).add_header('p');
+    return (new bits.Encoder('p'))
+      .push_cstring(password);
   },
   Query: function (query) {
-    return "".add_cstring(query).add_header('Q');
+    return (new bits.Encoder('Q'))
+      .push_cstring(query);
   },
   SSLRequest: function () {
-    return "".add_int32(0x4D2162F).add_header();
+    return (new bits.Encoder())
+      .push_int32(0x4D2162F);
   },
   StartupMessage: function (options) {
     // Protocol version number 3
-    return ("".add_int32(0x30000) +
-      options.map_pairs(function (key, value) {
-        return "".add_cstring(key).add_cstring(value);
-      }).join("") + "0").add_header();
+    return (new bits.Encoder())
+      .push_int32(0x30000)
+      .push_hash(options);
   },
   Sync: function () {
-    return [].add_header('S');
+    return new bits.Encoder('S');
   },
   Terminate: function () {
-    return [].add_header('X');
+    return new bits.Encoder('X');
   }
 };
 
 // Parse response streams from the server
 function parse_response(code, stream) {
-  var type, args;
+  var input, type, args, num_fields, data, size, i;
+  input = new bits.Decoder(stream);
   args = [];
   switch (code) {
   case 'R':
-    switch (stream.parse_int32()[1]) {
+    switch (stream.shift_int32()) {
     case 0:
       type = "AuthenticationOk";
       break;
@@ -102,11 +88,11 @@ function parse_response(code, stream) {
       break;
     case 4:
       type = "AuthenticationCryptPassword";
-      args = stream.substr(4).parse(["raw_string", 2])[1];
+      args = [stream.shift_raw_string(2)];
       break;
     case 5:
       type = "AuthenticationMD5Password";
-      args = stream.substr(4).parse(["raw_string", 4])[1];
+      args = [stream.shift_raw_string(4)];
       break;
     case 6:
       type = "AuthenticationSCMCredential";
@@ -123,62 +109,56 @@ function parse_response(code, stream) {
   case 'E':
     type = "ErrorResponse";
     args = [{}];
-    stream.parse("multi_cstring")[1][0].forEach(function (field) {
+    stream.shift_multi_cstring().forEach(function (field) {
       args[0][field[0]] = field.substr(1);
     });
     break;
   case 'S':
     type = "ParameterStatus";
-    args = stream.parse("cstring", "cstring")[1];
+    args = [stream.shift_cstring(), stream.shift_cstring()];
     break;
   case 'K':
     type = "BackendKeyData";
-    args = stream.parse("int32", "int32")[1];
+    args = [stream.shift_int32(), stream.shift_int32()];
     break;
   case 'Z':
     type = "ReadyForQuery";
-    args = stream.parse(["raw_string", 1])[1];
+    args = [stream.shift_raw_string(1)];
     break;
   case 'T':
     type = "RowDescription";
-    var num_fields = stream.parse_int16()[1];
-    stream = stream.substr(2);
-    var row = [];
-    for (var i = 0; i < num_fields; i += 1) {
-      var parts = stream.parse("cstring", "int32", "int16", "int32", "int16", "int32", "int16");
-      row.push({
-        field: parts[1][0],
-        table_id: parts[1][1],
-        column_id: parts[1][2],
-        type_id: parts[1][3],
-        type_size: parts[1][4],
-        type_modifier: parts[1][5],
-        format_code: parts[1][6]
+    num_fields = stream.shift_int16();
+    data = [];
+    for (i = 0; i < num_fields; i += 1) {
+      data.push({
+        field: stream.shift_cstring(),
+        table_id: stream.shift_int32(),
+        column_id: stream.shift_int16(),
+        type_id: stream.shift_int32(),
+        type_size: stream.shift_int16(),
+        type_modifier: stream.shift_int32(),
+        format_code: stream.shift_int16()
       });
-      stream = stream.substr(parts[0]);
     }
-    args = [row];
+    args = [data];
     break;
   case 'D':
     type = "DataRow";
-    var data = [];
-    var num_cols = stream.parse_int16()[1];
-    stream = stream.substr(2);
-    for (i = 0; i < num_cols; i += 1) {
-      var size = stream.parse_int32()[1];
-      stream = stream.substr(4);
+    data = [];
+    num_fields = stream.shift_int16();
+    for (i = 0; i < num_fields; i += 1) {
+      size = stream.shift_int32();
       if (size === -1) {
         data.push(null);
       } else {
-        data.push(stream.parse_raw_string(size)[1]);
-        stream = stream.substr(size);
+        data.push(stream.shift_raw_string(size));
       }
     }
     args = [data];
     break;
   case 'C':
     type = "CommandComplete";
-    args = stream.parse("cstring")[1];
+    args = [stream.shift_cstring()];
     break;
   }
   if (!type) {
@@ -189,24 +169,22 @@ function parse_response(code, stream) {
 
 
 exports.Connection = function (database, username, password, port, host) {
+  var connection, events, query_queue, row_description, query_callback, results, readyState, closeState;
   
   // Default to port 5432
   if (port === undefined) {
     port = 5432;
   }
 
-  var connection = tcp.createConnection(port, host);
-  var events = new process.EventEmitter();
-  var query_queue = [];
-  var row_description;
-  var query_callback;
-  var results;
-  var readyState = false;
-  var closeState = false;
+  connection = tcp.createConnection(port, host);
+  events = new process.EventEmitter();
+  query_queue = [];
+  readyState = false;
+  closeState = false;
 
   // Sends a message to the postgres server
   function sendMessage(type, args) {
-    var stream = formatter[type].apply(this, args);
+    var stream = (formatter[type].apply(this, args)).toString();
     if (exports.DEBUG > 0) {
       sys.debug("Sending " + type + ": " + JSON.stringify(args));
       if (exports.DEBUG > 2) {
@@ -222,20 +200,20 @@ exports.Connection = function (database, username, password, port, host) {
     sendMessage('StartupMessage', [{user: username, database: database}]);
   });
   connection.addListener("receive", function (data) {
-
+    var input, code, len, stream, command;
+    input = new bits.Decoder(data);
     if (exports.DEBUG > 2) {
       sys.debug("<-" + JSON.stringify(data));
     }
   
-    while (data.length > 0) {
-      var code = data[0];
-      var len = data.substr(1, 4).parse_int32()[1];
-      var stream = data.substr(5, len - 4);
-      data = data.substr(len + 1);
+    while (input.data.length > 0) {
+      code = input.shift_code();
+      len = input.shift_int32();
+      stream = new bits.Decoder(input.shift_raw_string(len - 4));
       if (exports.DEBUG > 1) {
         sys.debug("stream: " + code + " " + JSON.stringify(stream));
       }
-      var command = parse_response(code, stream);
+      command = parse_response(code, stream);
       if (command.type) {
         if (exports.DEBUG > 0) {
           sys.debug("Received " + command.type + ": " + JSON.stringify(command.args));
@@ -287,10 +265,12 @@ exports.Connection = function (database, username, password, port, host) {
     results = [];
   });
   events.addListener("DataRow", function (data) {
-    var row = {};
-    for (var i = 0, l = data.length; i < l; i += 1) {
-      var description = row_description[i];
-      var value = data[i];
+    var row, i, l, description, value;
+    row = {};
+    l = data.length;
+    for (i = 0; i < l; i += 1) {
+      description = row_description[i];
+      value = data[i];
       if (value !== null) {
         // TODO: investigate to see if these numbers are stable across databases or
         // if we need to dynamically pull them from the pg_types table
