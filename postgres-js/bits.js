@@ -143,12 +143,3 @@
   
 
 }());
-
-
-exports.parseDate = function (str) {
-  var parts = str.split(' ');
-  var date = parts[0].split('-');
-  var time = parts[1].split(':');
-
-  var timestamp = date.
-}

@@ -1,13 +1,16 @@
 /*jslint bitwise: true, eqeqeq: true, immed: true, newcap: true, nomen: true, onevar: true, plusplus: true, regexp: true, undef: true, white: true, indent: 2 */
 /*globals include md5 node exports */
-
 process.mixin(require('./postgres-js/md5'));
+
 var bits = require('./postgres-js/bits');
+var oid = require("./postgres-js/type-oids");
+var parsers = require("./postgres-js/parsers");
 var tcp = require("tcp");
 var sys = require("sys");
-var oid = require("./postgres-js/type-oids.js");
 
 exports.DEBUG = 0;
+
+var postgres_parameters = {};
 
 // http://www.postgresql.org/docs/8.3/static/protocol-message-formats.html
 var formatter = {
@@ -246,6 +249,9 @@ exports.Connection = function (database, username, password, port, host) {
       connection.close();
     }
   });
+  events.addListener('ParameterStatus', function(key, value) {
+    postgres_parameters[key] = value;
+  });
   events.addListener('ReadyForQuery', function () {
     if (query_queue.length > 0) {
       var query = query_queue.shift();
@@ -283,8 +289,16 @@ exports.Connection = function (database, username, password, port, host) {
         case oid.INT4:
           value = parseInt(value, 10);
           break;
-        case oid.DATE: // date
-          value = parseDate(value);
+        case oid.DATE:
+        case oid.TIME:
+        case oid.TIMESTAMP:
+        case oid.TIMESTAMPTZ:
+          value = parsers.parseDateFromPostgres(
+                            value,
+                            postgres_parameters['DateStyle'],
+                            description.type_id
+                          );
+          break;
         }
       }
       row[description.field] = value;
