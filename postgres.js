@@ -1,10 +1,10 @@
 /*jslint bitwise: true, eqeqeq: true, immed: true, newcap: true, nomen: true, onevar: true, plusplus: true, regexp: true, undef: true, white: true, indent: 2 */
 /*globals include md5 node exports */
-process.mixin(require('./postgres-js/md5'));
+process.mixin(require('./lib/md5'));
 
-var bits = require('./postgres-js/bits');
-var oid = require("./postgres-js/type-oids");
-var parsers = require("./postgres-js/parsers");
+var bits = require('./lib/bits');
+var oid = require("./lib/type-oids");
+var parsers = require("./lib/parsers");
 var tcp = require("tcp");
 var sys = require("sys");
 
