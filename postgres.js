@@ -255,7 +255,7 @@ exports.Connection = function (database, username, password, port, host) {
   events.addListener('ReadyForQuery', function () {
     if (query_queue.length > 0) {
       var query = query_queue.shift();
-      query_callback = query.callback;
+      query_callback = query.callback || function() {};
       sendMessage('Query', [query.sql]);
       readyState = false;
     } else {
