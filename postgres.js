@@ -1,5 +1,22 @@
 /*jslint bitwise: true, eqeqeq: true, immed: true, newcap: true, nomen: true, onevar: true, plusplus: true, regexp: true, undef: true, white: true, indent: 2 */
 /*globals include md5 node exports */
+
+/* Expected flow is:
+   Query
+    * RowDescription
+    * DataRow
+    * CommandComplete
+    * ReadyForQuery
+   Parse
+    * Parse
+    * ParseCompleted
+   Bind
+    * Bind
+    * BindCompleted
+   Execute
+    * Execute
+*/
+
 process.mixin(require('./lib/md5'));
 
 var bits = require('./lib/bits');
@@ -8,12 +25,39 @@ var parsers = require("./lib/parsers");
 var tcp = require("tcp");
 var sys = require("sys");
 
-exports.DEBUG = 0;
+exports.DEBUG = 1;
 
 var postgres_parameters = {};
 
 // http://www.postgresql.org/docs/8.3/static/protocol-message-formats.html
 var formatter = {
+  
+  Bind: function (name, statement, args) {
+      var b = (new bits.Encoder('B'))
+        .push_cstring(name)     // The name of the bound portal
+        .push_cstring(statement) // The name of the prepared statement
+        .push_int16(args.length); // Add the number of format codes.
+        //.push_int16(0) // Marks them all as text
+      for (var i = 0; i < args.length; i++) {
+          b.push_int16(0);        // Mark them all text.
+      }
+      b.push_int16(args.length); // Add the number of parameters.
+      
+      for (var i = 0; i < args.length; i++) {
+          // Add the size of the parameter.
+          b.push_int32( process._byteLength(args[i]) ); // Add the length of the argument
+          b.push_raw_string( args[i] ); // Add the argument itself.
+          
+      };
+      b.push_int16(1);
+      b.push_int16(0);
+      //b.push_int16(0); // Mark that we don't know what the response is going to be.
+      //b.push_int16(0); 
+      //b.push_int16(0); // All of them should be text.
+      
+      return b;
+  },
+  
   CopyData: function () {
     // TODO: implement
   },
@@ -36,14 +80,27 @@ var formatter = {
   FunctionCall: function () {
     // TODO: implement
   },
-  Parse: function (name, query, var_types) {
+  Parse: function (name, query, args) {
+      if (exports.DEBUG > 0) {
+          sys.debug("Name is " + name);
+          sys.debug("Query is " + query);
+          sys.debug("Args are " + args);
+      }
     var builder = (new bits.Encoder('P'))
       .push_cstring(name)
-      .push_cstring(query)
-      .push_int16(var_types.length);
-    var_types.each(function (var_type) {
-      builder.push_int32(var_type);
-    });
+      .push_cstring(query);
+      // sys.p(args);
+    if (args.length > 0) {
+        builder.push_int16(args.length);
+        for (var i = 0; i <= args.length; i++) {
+            builder.push_int32(0);
+        }
+    }
+    else {
+        builder.push_int16(0);
+        // builder.push_int32(0);
+        // No types.
+    }
     return builder;
   },
   PasswordMessage: function (password) {
@@ -120,6 +177,15 @@ function parse_response(code, stream) {
     type = "ParameterStatus";
     args = [stream.shift_cstring(), stream.shift_cstring()];
     break;
+  case 't':
+    type = "ParameterDescription";
+    var len = stream.shift_int16();
+    var data = [];
+    for (var i = 0; i < len; i++) {
+        data.push( stream.shift_int32 );
+    }
+    args = data;
+    break;
   case 'K':
     type = "BackendKeyData";
     args = [stream.shift_int32(), stream.shift_int32()];
@@ -163,6 +229,17 @@ function parse_response(code, stream) {
     type = "CommandComplete";
     args = [stream.shift_cstring()];
     break;
+
+  case '1': // Parse Complete.
+    if (exports.DEBUG > 0) {
+        sys.debug("Got a ParseComplete message.");
+    }
+    type = "ParseComplete";
+    args = [stream.shift_int32];
+    break;
+  case '2':
+    type = "BindComplete";
+    break;
   }
   if (!type) {
     sys.debug("Unknown response " + code);  
@@ -171,7 +248,7 @@ function parse_response(code, stream) {
 }
 
 
-exports.Connection = function (database, username, password, port, host) {
+exports.connect = function (database, username, password, port, host) {
   var connection, events, query_queue, row_description, query_callback, results, readyState, closeState;
   
   // Default to port 5432
@@ -189,17 +266,29 @@ exports.Connection = function (database, username, password, port, host) {
   query_queue = [];
   readyState = false;
   closeState = false;
-
+  needsFlush = false;
+  msg_queue = [];
+  
+  var cQuery; // This is the currently executing query.
+  
+  canQuery = false;
+  
   // Sends a message to the postgres server
   function sendMessage(type, args) {
-    var stream = (formatter[type].apply(this, args)).toString();
-    if (exports.DEBUG > 0) {
-      sys.debug("Sending " + type + ": " + JSON.stringify(args));
-      if (exports.DEBUG > 2) {
-        sys.debug("->" + JSON.stringify(stream));
+      
+      if (exports.DEBUG > 0) {
+          sys.debug("Type is " + type);
+          sys.debug("Args are " + args);
       }
-    }
-    connection.send(stream, "binary");
+      
+      var stream = (formatter[type].apply(this, args)).toString();
+      if (exports.DEBUG > 0) {
+        sys.debug("Sending " + type + ": " + JSON.stringify(args));
+        if (exports.DEBUG >= 2) {
+          sys.debug("->" + JSON.stringify(stream));
+        }
+      }
+      connection.send(stream, "binary");
   }
   
   // Set up tcp client
@@ -207,8 +296,13 @@ exports.Connection = function (database, username, password, port, host) {
   connection.addListener("connect", function () {
     sendMessage('StartupMessage', [{user: username, database: database}]);
   });
+  
+  //
   connection.addListener("receive", function (data) {
     var input, code, len, stream, command;
+    if (exports.DEBUG > 1){
+        sys.debug("Got a response. Attempting to decode.");
+    }
     input = new bits.Decoder(data);
     if (exports.DEBUG > 2) {
       sys.debug("<-" + JSON.stringify(data));
@@ -223,64 +317,181 @@ exports.Connection = function (database, username, password, port, host) {
       }
       command = parse_response(code, stream);
       if (command.type) {
-        if (exports.DEBUG > 0) {
+        if (exports.DEBUG > 1) {
           sys.debug("Received " + command.type + ": " + JSON.stringify(command.args));
         }
         command.args.unshift(command.type);
-        events.emit.apply(events, command.args);
+        if (cQuery != null && cQuery.events != undefined) {
+            if (exports.DEBUG > 0) {
+                sys.debug ("Current query is not null and current query is " + cQuery.type);
+            }
+            if (cQuery.events.listeners(command.type).length >= 1) {
+                cQuery.events.emit.apply(cQuery.events, command.args);
+            }
+            else {
+                events.emit.apply(events, command.args);
+            }
+        }
+        else {
+            events.emit.apply(events, command.args);
+        }
       }
     }
   });
+  //
   connection.addListener("eof", function (data) {
     connection.close();
   });
+  //
   connection.addListener("disconnect", function (had_error) {
     if (had_error) {
       sys.debug("CONNECTION DIED WITH ERROR");
     }
   });
-
+  
   // Set up callbacks to automatically do the login
   events.addListener('AuthenticationMD5Password', function (salt) {
     var result = "md5" + md5(md5(password + username) + salt);
     sendMessage('PasswordMessage', [result]);
   });
+  //
   events.addListener('AuthenticationCleartextPassword', function () {
     sendMessage('PasswordMessage', [password]);
   });
+  //
   events.addListener('ErrorResponse', function (e) {
     if (e.S === 'FATAL') {
       sys.debug(e.S + ": " + e.M);
-      connection.close();
+      connection.close(); // Well, that's bad.
+    }
+    if (e.S === "ERROR") {
+        // var err = new Error();
+        // err.name = "Error";
+        // err.message = e.M;
+        // throw err;
+        sys.p(e);
+        msg = new String(e.M);
+        throw new Error("DB Error: " + msg);
     }
   });
+  //
+  
   events.addListener('ParameterStatus', function(key, value) {
-    postgres_parameters[key] = value;
+      postgres_parameters[key] = value;
   });
-  events.addListener('ReadyForQuery', function () {
-    if (query_queue.length > 0) {
-      var query = query_queue.shift();
-      query_callback = query.callback || function() {};
-      sendMessage('Query', [query.sql]);
-      readyState = false;
-    } else {
-      if (closeState) {
-        connection.close();
-      } else {
-        readyState = true;
+  
+  function queue (msg) {
+      msg_queue.push(msg);
+  }
+  
+  function flush (promise, eventHandler) {
+      // We now flush all entries in the queue. 
+      // We iterate the query_queue, send each message, and finally use the 
+      // object provided us as the Event responder for this query set. 
+      
+      var q = {type:"Flush", events:eventHandler, promise: promise};
+      msg_queue.push(q);
+      sys.debug(canQuery);
+      
+      if (canQuery) {
+          events.emit("FlushBuffer");
       }
-    }
+  }
+  
+  function send (msg) {
+      
+      if (canQuery && !closeState) {
+          // immediately send the message
+          canQuery = false;
+          cQuery = msg;
+          sendMessage(msg.type, cQuery.args);
+      }
+      else if (closeState) {
+          // Raise an error
+          throw new Error("Cannot execute queries on closed handle.");
+      }
+      else {
+          // Push it onto the stack, and return.
+          msg_queue.push(msg);
+      }
+  }
+  
+  // The main query buffer; this handles *all* query traffic.
+  
+  events.addListener("FlushBuffer", function () {
+      
+      if (msg_queue.length > 0) {
+          canQuery = false;
+          var i;
+          var len = msg_queue.length;
+          for (i = 0; i < len; i++) {
+              var Query = msg_queue.shift();
+              if (exports.DEBUG > 0) {
+                sys.debug("RFQ: "+Query.type);
+              }
+              if (Query.type == "Flush") {
+                  cQuery = Query;
+                  sendMessage(Query.type, Query.args);
+                  break; // Exit this loop.
+              }
+              else {
+                  // Just send the message.
+                  sendMessage(Query.type, Query.args);
+              }
+          }
+        // var Query = msg_queue.shift(); // Grab the first.
+
+        // query_callback = query.callback || function () {};
+      } else {
+        // if (closeState) {
+        //     // This is not how we should be shutting down.
+        // 
+        //     connection.close();
+        // } else {
+          canQuery = true;
+          cQuery = null; // Done and Handled.
+      }
+      
   });
+  
+  
+  events.addListener('ReadyForQuery', function () {
+      
+      if (msg_queue.length > 0) {
+          events.emit("FlushBuffer");
+      } else {
+        if (closeState) {
+            // This is not how we should be shutting down.
+            sys.debug("Got shutdown.");
+            msg_queue.push({type:"Terminate", args:[]});
+            connection.close(); // Shut it all down.
+        }
+      }
+      // // Do we have anything on the buffer?
+      // if (msg_queue.length > 0) {
+      //     events.emit("FlushBuffer");
+      // }
+      // else if (closeState) {
+      //     msg_queue.push({type:"Terminate", });
+      // }
+
+  });
+  
   events.addListener("RowDescription", function (data) {
-    row_description = data;
-    results = [];
+    cQuery.row_description = data;
+    cQuery.results = [];
   });
+  
   events.addListener("DataRow", function (data) {
+      dataParser(data, cQuery); // use the global query context.
+  });
+  
+  function dataParser (data, mQuery) {
     var row, i, l, description, value;
     row = {};
     l = data.length;
     for (i = 0; i < l; i += 1) {
-      description = row_description[i];
+      description = mQuery.row_description[i];
       value = data[i];
       if (value !== null) {
         // TODO: investigate to see if these numbers are stable across databases or
@@ -308,117 +519,215 @@ exports.Connection = function (database, username, password, port, host) {
       }
       row[description.field] = value;
     }
-    results.push(row);
-  });
+    mQuery.results.push(row);
+  };
   events.addListener('CommandComplete', function (data) {
-    query_callback.call(this, results);
+      // cQuery.promise.emitSuccess(data);
+      cQuery.promise.emitSuccess( cQuery.results );
+      //query_callback.call(this, results);
   });
-
-  this.query = function (sql, args, callback) {
-      
-      if (callback == null) {
-          
-          // This has no parameters to manipulate.
-          
-          // Assume the args value is the callback
-          sys.puts("Null callback");
-          sys.p(args);
-          query_queue.push({sql: sql, callback: args || function () {}  });
-          if (readyState) {
-            events.emit('ReadyForQuery');
-          }
+  
+  events.addListener("Notice", function (data) {
+      // This is a string message from PG - not an error.
+      sys.puts(d.S + " :: " + d.M);
+  });
+  
+  
+  this.query = function (sql, args) {
+      var p = new process.Promise();
+      if (sql.match(/\?/)) {
+          // We will do an anonymous prepared statement.
+          ;
       }
       else {
-          // We have an args list.
-          // This means, we have to map our ?'s and test for a variety of 
-          // edge cases.
-          sys.puts("Got args.");
-          var i = 0;
-          var slice = md5(md5(sql));
-          //sys.p(slice);
-          var offset = Math.floor(Math.random() * 10);
-          cont = "$" + slice.replace(/\d/g, "").slice(offset,4+offset) + "$";
-          var treated = sql;
-          sys.p(cont);
-          if (sql.match(/\?/)) {
-              treated = sql.replace(/\?/g, function (str, offset, s) {
-                  if (!args[i]) {
-                      // raise an error
-                      throw new Error("Argument "+i+" does not exist!");
-                  }
-                  return cont+args[i]+cont;
-              } );
-          }
-          sys.p(treated);
-          query_queue.push({sql: treated, callback: callback});
-          if (readyState) {
-            events.emit('ReadyForQuery');
-          }
+          // We can just emit a simple query.
+          
+          queue({type:"Query", args:[sql], promise: p});
+          return p;
       }
-      
   };
   
   this.prepare = function (query) {
       
-      var r = new process.Promise();
-      var name = md5(md5(query));
-      var offset = Math.floor(Math.random() * 10);
-      name = name.replace(/\d/g, "").slice(offset,4+offset);
+      var p = new process.Promise();
       
       var treated = query;
       var i = 0;
+      var arglist = new Array();
+      // Replace all ?'s with bind parameters.
       if (query.match(/\?/)) {
-          
           treated = treated.replace(/\?/g, function (str, p1, offset, s) {
               i = i + 1;
+              arglist.push(0); // a null string, representing that it is, in fact, an item.
               return "$"+i;
           });
       }
+      var name = md5(md5(query));
+      var offset = Math.floor(Math.random() * 10);
+      name = "postgres_js_prepared_" + name.replace(/\d/g, "").slice(offset,4+offset);
       
-      stmt = "PREPARE " + name + " AS " + treated;
+      // Assumes, for the moment, that all the bind variables are going to be
+      // text, as we otherwise don't know what they are.
       
-      var conn = this;
-      
-      query_queue.push({sql: stmt, callback: function (c) {
-          // R is going to be null or otherwise weird, as we're emitting
-          // a PREPARE, instead of anything that would return useful data
-          // from the database.
-          var q = new Stmt(name, i, conn );
-          r.emitSuccess(q);
-      }
+      var e = new process.EventEmitter();
+      var Stmt = new Statement(name, i, p);
+      e.addListener("ParseComplete", function (data) {
+          // Our next message is (probably) going to be a ReadyForQuery.
+          canQuery = true; // Say that we now allow for more queries on the wire.
+          if (exports.DEBUG > 0) {
+              sys.debug("Prepare:: ParseComplete message received.");
+          }
+          p.emitSuccess();
       });
-      return r;
+      
+      queue( {type:"Parse", args:[name, treated, []] } );
+      
+      var rowDesc = [];
+      flush(p, e); // Issues the implied Flush command.
+      
+      //return p;
+      return Stmt;
   };
   
+  function Statement (name, len, prepared) {
+      // Execute sets up a bind, and then executes the statement.
+      //queue( {type:"Describe", args:[name] });
+      
+      // Until it's prepared, we won't ever Flush. This all becomes
+      // asynchronous
+      
+      var format;
+      var row_description = [];
+      
+      var isPrepared = false;
+      var iBuffer = [];
+      
+      var isDescribed = false;
+      
+      prepared.addCallback(function () {
+          if (exports.DEBUG > 0) {
+              sys.debug("Statement:: Prepare completed.");
+          }
+          isPrepared = true;
+          // If there's any buffered executes, perform them now.
+          // 
+          if (iBuffer.length > 0) {
+              if (exports.DEBUG > 0) {
+                  sys.debug("Found internal buffer.");
+              }
+              for (var i = 0; i < iBuffer.length; i++) {
+                  var o = iBuffer[i];
+                  if (o.type == "Flush") {
+                      if (exports.DEBUG > 0) {
+                          sys.debug("Flushing.");
+                      }
+                      flush(o.promise, o.events);
+                  }
+                  else {
+                      if (exports.DEBUG > 0) {
+                          sys.debug("Queuing "+ o.type);
+                      }
+                      queue(o);
+                  }
+              }
+              iBuffer = []; // Zero it.
+          }
+      });
+      
+      this.execute = function (args) {
+          
+          if (args.length > len) {
+              throw new Error("Cannot execute: Too many arguments");
+          }
+          else if (args.length < len) {
+              
+              // We need to pad out the length with nulls
+              for (var i = args.length; i<= len; i++) {
+                  args.push(null);
+              }
+          }
+          var e = new process.EventEmitter();
+          var promise = new process.Promise();
+          
+          // var our = this;
+          // our.results = [];
+          var our = new Object();
+          var obj = this;
+          our.results = [];
+          our.row_description = null;
+          e.addListener("BindComplete", function (data) {
+              // This is good, but we don't need to do anything as a result.
+              if (exports.DEBUG > 0) {
+                  sys.debug("got Bind Complete");
+              }
+          });
+          
+          e.addListener("ParameterDescription", function (data) {
+              // Defines what our system actually needs to send. For the 
+              // moment, we don't need to worry about this.
+              if (exports.DEBUG > 0) {
+                  sys.debug("got Parameter Description");
+              }
+          });
+          
+          e.addListener("RowDescription", function (data) {
+              if (exports.DEBUG > 0) {
+                  sys.debug("got Row Description");
+              }
+              obj.row_description = data;
+              our.results = [];
+              isDescribed = true;
+          });
+          
+          e.addListener("DataRow", function (data) {
+              if (exports.DEBUG > 0) {
+                  sys.debug("got a Data Row");
+              }
+              if (our.row_description == null) {
+                  our.row_description = obj.row_description;
+              }
+              dataParser(data, our);
+          });
+          
+          e.addListener("CommandComplete", function (data) {
+              if (exports.DEBUG > 0) {
+                  sys.debug("got CommandComplete");
+              }
+              promise.emitSuccess(our.results);
+              events.emit("ReadyForQuery");
+          });
+          
+          
+          if (isPrepared == true) {
+              
+              if (!(isDescribed)) {
+                  queue( {type:"Describe", args:[name, "S"] } );
+                  isDescribed = true;
+              }
+              // We use the main buffer for queries.
+              queue( {type:"Bind", args:["", name, args] } );
+              queue( {type:"Execute", args:["", 0] } );
+              flush(promise, e); // Issues the implied Flush command.
+          }
+          else if (isPrepared == false) {
+              // we buffer internally until we get the main buffering response.
+              
+              if (!(isDescribed)) {
+                  iBuffer.push( {type:"Describe", args:[name, "S"] } );
+                  isDescribed = true;
+              }
+              
+              iBuffer.push( {type:"Bind", args:["", name, args] } );
+              iBuffer.push( {type:"Execute", args:["", 0] } );
+              iBuffer.push( {type:"Flush", events: e, promise: p } ); 
+          }
+          return promise; // Return our Promise.
+      };
+  }
+  
   this.close = function () {
-    closeState = true;
+      // This needs to be updated to handle a DB-side close
+      closeState = true;
   };
   
 };
-
-function Stmt (name, len, conn) {
-    var stmt = "EXECUTE "+name+" ( ";
-    var que = [];
-    for (var i = 1; i<=len; i++) {
-        que.push("?");
-    }
-    stmt = stmt + que.join(",") + " )";
-    
-    sys.puts(stmt);
-    
-    this.execute = function (args, callback) {
-        if (args.length > len) {
-            throw new Error("Cannot execute: Too many arguments");
-        }
-        else if (args.length < len) {
-            // Pad out the length with nulls.
-            for (var i = args.length; i<= len; i++) {
-                args.push(null);
-            }
-        }
-        else {
-            // Nothing to see here.
-            ;
-        }
-        return conn.query(stmt, args, callback);
-    };
