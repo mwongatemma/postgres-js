@@ -25,7 +25,7 @@ var parsers = require("./lib/parsers");
 var tcp = require("tcp");
 var sys = require("sys");
 
-exports.DEBUG = 1;
+exports.DEBUG = 0;
 
 var postgres_parameters = {};
 
@@ -263,15 +263,16 @@ exports.connect = function (database, username, password, port, host) {
 
   connection = tcp.createConnection(port, host=t_host);
   events = new process.EventEmitter();
-  query_queue = [];
+  
   readyState = false;
-  closeState = false;
-  needsFlush = false;
-  msg_queue = [];
   
   var cQuery; // This is the currently executing query.
   
-  canQuery = false;
+  // msg_queue = [];   // Our query buffer.
+  msg_queue = new Buffer();
+  canQuery = false; // Whether or not we can push new queries onto the wire.
+  closeState = false; // Is our connection to be closed? If so, we 
+                      // shouldn't accept new messages.
   
   // Sends a message to the postgres server
   function sendMessage(type, args) {
@@ -361,7 +362,9 @@ exports.connect = function (database, username, password, port, host) {
   //
   events.addListener('ErrorResponse', function (e) {
     if (e.S === 'FATAL') {
+      
       sys.debug(e.S + ": " + e.M);
+      
       connection.close(); // Well, that's bad.
     }
     if (e.S === "ERROR") {
@@ -384,14 +387,7 @@ exports.connect = function (database, username, password, port, host) {
       msg_queue.push(msg);
   }
   
-  function flush (promise, eventHandler) {
-      // We now flush all entries in the queue. 
-      // We iterate the query_queue, send each message, and finally use the 
-      // object provided us as the Event responder for this query set. 
-      
-      var q = {type:"Flush", events:eventHandler, promise: promise};
-      msg_queue.push(q);
-      sys.debug(canQuery);
+  function flush () {
       
       if (canQuery) {
           events.emit("FlushBuffer");
@@ -418,36 +414,27 @@ exports.connect = function (database, username, password, port, host) {
   
   // The main query buffer; this handles *all* query traffic.
   
+  msg_queue.each(function (Q) {
+      
+      if (Q.msgs.length > 0) {
+          cQuery = Q;
+          for (var i = 0; i<Q.msgs.length; i++) {
+              var o = Q.msgs[i];
+              sendMessage( o.type, o.args );
+          }
+      }
+  });
+  
   events.addListener("FlushBuffer", function () {
       
       if (msg_queue.length > 0) {
-          canQuery = false;
-          var i;
-          var len = msg_queue.length;
-          for (i = 0; i < len; i++) {
-              var Query = msg_queue.shift();
-              if (exports.DEBUG > 0) {
-                sys.debug("RFQ: "+Query.type);
-              }
-              if (Query.type == "Flush") {
-                  cQuery = Query;
-                  sendMessage(Query.type, Query.args);
-                  break; // Exit this loop.
-              }
-              else {
-                  // Just send the message.
-                  sendMessage(Query.type, Query.args);
-              }
+          
+          if (canQuery == true) {
+              canQuery = false;
+              msg_queue.next();
           }
-        // var Query = msg_queue.shift(); // Grab the first.
-
-        // query_callback = query.callback || function () {};
+          
       } else {
-        // if (closeState) {
-        //     // This is not how we should be shutting down.
-        // 
-        //     connection.close();
-        // } else {
           canQuery = true;
           cQuery = null; // Done and Handled.
       }
@@ -457,24 +444,18 @@ exports.connect = function (database, username, password, port, host) {
   
   events.addListener('ReadyForQuery', function () {
       
+      canQuery = true;
       if (msg_queue.length > 0) {
           events.emit("FlushBuffer");
       } else {
         if (closeState) {
             // This is not how we should be shutting down.
-            sys.debug("Got shutdown.");
-            msg_queue.push({type:"Terminate", args:[]});
-            connection.close(); // Shut it all down.
+            // sys.debug("Got shutdown.");
+            // msg_queue.push({type:"Terminate", args:[]});
+            // events.emit("FlushBuffer");
+            // connection.close(); // Shut it all down.
         }
       }
-      // // Do we have anything on the buffer?
-      // if (msg_queue.length > 0) {
-      //     events.emit("FlushBuffer");
-      // }
-      // else if (closeState) {
-      //     msg_queue.push({type:"Terminate", });
-      // }
-
   });
   
   events.addListener("RowDescription", function (data) {
@@ -542,7 +523,12 @@ exports.connect = function (database, username, password, port, host) {
       else {
           // We can just emit a simple query.
           
-          queue({type:"Query", args:[sql], promise: p});
+          queue({
+              promise: p,
+              msgs: [
+                { type:"Query", args:[sql] }, // Add the one message to the internal buffer.
+              ]
+          });
           return p;
       }
   };
@@ -580,10 +566,17 @@ exports.connect = function (database, username, password, port, host) {
           p.emitSuccess();
       });
       
-      queue( {type:"Parse", args:[name, treated, []] } );
+      queue({
+          promise: p,
+          events: e,
+          msgs: [
+            { type:"Parse", args:[name, treated, []] }, // Adds a single message to the internal buffer.
+            { type:"Flush", args:[] },
+          ]
+      });
       
       var rowDesc = [];
-      flush(p, e); // Issues the implied Flush command.
+      flush(); // Issues the implied Flush command.
       
       //return p;
       return Stmt;
@@ -608,30 +601,22 @@ exports.connect = function (database, username, password, port, host) {
           if (exports.DEBUG > 0) {
               sys.debug("Statement:: Prepare completed.");
           }
+          canQuery = true;
           isPrepared = true;
+          flush();
           // If there's any buffered executes, perform them now.
           // 
-          if (iBuffer.length > 0) {
-              if (exports.DEBUG > 0) {
-                  sys.debug("Found internal buffer.");
-              }
-              for (var i = 0; i < iBuffer.length; i++) {
-                  var o = iBuffer[i];
-                  if (o.type == "Flush") {
-                      if (exports.DEBUG > 0) {
-                          sys.debug("Flushing.");
-                      }
-                      flush(o.promise, o.events);
-                  }
-                  else {
-                      if (exports.DEBUG > 0) {
-                          sys.debug("Queuing "+ o.type);
-                      }
-                      queue(o);
-                  }
-              }
-              iBuffer = []; // Zero it.
-          }
+          // if (iBuffer.length > 0) {
+          //     if (exports.DEBUG > 0) {
+          //         sys.debug("Found internal buffer.");
+          //     }
+          //     for (var i = 0; i < iBuffer.length; i++) {
+          //         var o = iBuffer[i];
+          //         queue(o);
+          //     }
+          //     flush();
+          //     iBuffer = []; // Zero it.
+          // }
       });
       
       this.execute = function (args) {
@@ -698,28 +683,31 @@ exports.connect = function (database, username, password, port, host) {
           });
           
           
+          var msgs = [];
+          
+          if (!(isDescribed)) {
+              msgs.push( {type:"Describe", args:[name, "S"] } );
+              isDescribed = true;
+          }
+          // We use the main buffer for queries.
+          msgs.push( {type:"Bind", args:["", name, args] } );
+          msgs.push( {type:"Execute", args:["", 0] } );
+          msgs.push( {type:"Flush", args:[] } ); 
+          
+          queue({ 
+              events: e, 
+              promise: p,
+              msgs:msgs
+          });
+          
           if (isPrepared == true) {
               
-              if (!(isDescribed)) {
-                  queue( {type:"Describe", args:[name, "S"] } );
-                  isDescribed = true;
-              }
-              // We use the main buffer for queries.
-              queue( {type:"Bind", args:["", name, args] } );
-              queue( {type:"Execute", args:["", 0] } );
-              flush(promise, e); // Issues the implied Flush command.
+              flush(); // Issues the implied Flush command.
           }
           else if (isPrepared == false) {
               // we buffer internally until we get the main buffering response.
-              
-              if (!(isDescribed)) {
-                  iBuffer.push( {type:"Describe", args:[name, "S"] } );
-                  isDescribed = true;
-              }
-              
-              iBuffer.push( {type:"Bind", args:["", name, args] } );
-              iBuffer.push( {type:"Execute", args:["", 0] } );
-              iBuffer.push( {type:"Flush", events: e, promise: p } ); 
+              canQuery = false; // No more queries until we're ready.
+
           }
           return promise; // Return our Promise.
       };
@@ -727,7 +715,83 @@ exports.connect = function (database, username, password, port, host) {
   
   this.close = function () {
       // This needs to be updated to handle a DB-side close
-      closeState = true;
+      
+      queue({ msgs:[{type:"Terminate", args:[]}] });
+      connection.close(); // G'bye.
+      
+  };
+  this.commit = function () {
+      var p = new process.Promise();
+      queue({ msgs:[{type:"Sync", args:[]}], promise:p });
+      return p;
+  };
+  
+  this.rollback = function () {
+      return this.query("ROLLBACK");
   };
   
 };
+
+
+function queue () {
+    
+    if (mainBuffer.hasElements) {
+        mainBuffer.each(function (i) {
+            // Registers the sendNextItem 
+            // Now, if callbacks end up pushing additional statements onto
+            // their buffers, I will end up with another message hitting
+            // this buffer.
+            sendMessage(i);
+        });
+    }
+}
+
+
+function Buffer () {
+    var buffer = [];
+    var position = 0;
+    var hasEnded = false;
+    this.e = new process.EventEmitter();
+    this.push = function (msg) {
+        buffer.push(msg);
+        this.length++;
+        if (hasEnded) {
+            hasEnded = false;
+            this.e.emit("nextItem");
+        }
+        this.e.emit("itemPushed");
+        
+    }
+    this.length = 0;
+    
+    this.next = function () {
+        this.e.emit("nextItem");
+    }
+    
+    this.unshift = function () {
+        pointer--;
+    }
+    
+    this.e.addListener("nextItem", function () {
+        if (buffer[position] !== undefined) {
+            // sys.puts(position);
+            // position = position + 1;
+            this.emit("sendNextItem", buffer[position++]);
+            
+        }
+        else {
+            hasEnded = true;
+            this.emit("eof");
+        }
+    });
+    // Expects to have the caller register itself as the nextItem callback.
+    
+    this.each = function(callback) {
+        this.e.addListener("sendNextItem", function (i) {
+            // sys.puts(position);
+            callback(i);
+            // this.emit("nextItem");
+        });
+        // this.e.emit("nextItem");
+    }
+}
