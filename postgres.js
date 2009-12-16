@@ -290,6 +290,10 @@ exports.connect = function (database, username, password, port, host) {
         }
       }
       connection.send(stream, "binary");
+      if (cQuery && cQuery.events) {
+          cQuery.events.emit("messageSent");
+      }
+      
   }
   
   // Set up tcp client
@@ -604,19 +608,6 @@ exports.connect = function (database, username, password, port, host) {
           canQuery = true;
           isPrepared = true;
           flush();
-          // If there's any buffered executes, perform them now.
-          // 
-          // if (iBuffer.length > 0) {
-          //     if (exports.DEBUG > 0) {
-          //         sys.debug("Found internal buffer.");
-          //     }
-          //     for (var i = 0; i < iBuffer.length; i++) {
-          //         var o = iBuffer[i];
-          //         queue(o);
-          //     }
-          //     flush();
-          //     iBuffer = []; // Zero it.
-          // }
       });
       
       this.execute = function (args) {
@@ -716,13 +707,17 @@ exports.connect = function (database, username, password, port, host) {
   this.close = function () {
       // This needs to be updated to handle a DB-side close
       
-      queue({ msgs:[{type:"Terminate", args:[]}] });
-      connection.close(); // G'bye.
+      var e = new process.EventEmitter();
+      e.addListener("messageSent", function () {
+          connection.close(); // G'bye.
+      });
+      queue({ msgs:[{type:"Terminate", args:[]}], events: e });
+      
       
   };
   this.commit = function () {
       var p = new process.Promise();
-      queue({ msgs:[{type:"Sync", args:[]}], promise:p });
+      queue({ msgs:[{type:"Sync", args:[]}], promise: p });
       return p;
   };
   
