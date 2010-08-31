@@ -14,4 +14,7 @@ db.prepare("SELECT ?::int", function (sth) {
         }
         db.end();
     });
+    sth.execute([2], function (rs) {
+        sys.puts(sys.inspect(rs));
+    })
 });
