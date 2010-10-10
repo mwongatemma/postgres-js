@@ -1,6 +1,6 @@
 var sys = require("sys");
 var pg = require("./lib/postgres-pure");
-// pg.DEBUG=1;
+pg.DEBUG=0;
 
 var db = new pg.connect("pgsql://test:12345@localhost:5432/template1");
 db.query("SELECT 1::int as foobar;", function (rs, tx) {
