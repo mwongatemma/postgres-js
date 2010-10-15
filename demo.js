@@ -28,6 +28,7 @@ db.prepare("SELECT ?::int AS foobar", function (sth, tx) {
 });
 
 db.transaction(function (tx) {
+    // tx.begin();
     tx.query("SELECT ?::int AS txtest1", 1, function (rs) {
         sys.puts(sys.inspect(rs));
     });
@@ -36,7 +37,7 @@ db.transaction(function (tx) {
             sys.puts(sys.inspect(rs));
         });
     });
-    tx.commit();
+    // tx.commit();
 });
 
 db.close();
