@@ -3,31 +3,33 @@
 This library is a implementation of the PostgreSQL backend/frontend protocol in javascript.
 It uses the node.js tcp and event libraries.  A javascript md5 library is included for servers that require md5 password hashing (this is default).
 
-This library allows for the correct handling of prepared queries.
+This library allows for the correct handling of server-side prepared queries.
 
-If you wish to nest DB calls, db.close must be in the deepest callback, or all statements that occur inside of callbacks deeper than the callback which handles db.close will not be executed.
+Nested DB calls will be executed in the order of definition. 
 
 All code is available under the terms of the MIT license, unless otherwise noted (md5.js)
+
+(c) 2010, Tim Caswell, Aurynn Shaw.
 
 ## Example use
 
 	var sys = require("sys");
-	var pg = require("postgres");
+	var pg = require("postgres-pure");
 
     var db = new pg.connect("pgsql://test:12345@localhost:5432/template1");
 	db.query("SELECT * FROM sometable", function (data) {
-		sys.p(data);
+        console.log(data);
 	});
 	db.close();
 
 ## Example use of Parameterized Queries
 
     var sys = require("sys");
-    var pg = require("postgres");
+    var pg = require("postgres-pure");
     
     var db = new pg.connect("pgsql://test:12345@localhost:5432/template1");
-    db.query("SELECT * FROM yourtable WHERE id = ?", [1], function (data) {
-        sys.p(data);
+    db.query("SELECT * FROM yourtable WHERE id = ?", 1, function (data) {
+        console.log(data);
     });
     db.close();
 
@@ -37,10 +39,9 @@ All code is available under the terms of the MIT license, unless otherwise noted
     var pg = require("postgres");
     
     var db = new pg.connect("pgsql://test:12345@localhost:5432/template1");
-    
-    var stmt = db.prepare("SELECT * FROM yourtable WHERE id = ?");
-    
-    stmt.execute([1], function (d) {
-        sys.p(d);
-        db.close();
+    db.prepare("SELECT * FROM yourtable WHERE id = ?", function (stmt) {
+        stmt.execute(1, function (rs) {
+            console.log(rs[0]);
+        });
     });
+    db.close();
