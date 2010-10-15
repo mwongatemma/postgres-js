@@ -39,5 +39,4 @@ db.transaction(function (tx) {
     });
     // tx.commit();
 });
-
 db.close();
