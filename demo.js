@@ -12,26 +12,31 @@ db.query("SELECT 1::int as foobar;", function (rs, tx) {
 });
 
 db.prepare("SELECT ?::int AS foobar", function (sth, tx) {
-    sth.execute(1, function (rs, tx) {
+    sth.execute(1, function (rs) {
         sys.puts(sys.inspect(rs));
     });
     sth.execute(2, function (rs) {
         sys.puts(sys.inspect(rs));
         
     });
+    tx.prepare("SELECT ?::int AS cheese", function (sth) {
+       sth.execute(3, function (rs) {
+           sys.puts(sys.inspect(rs));
+       }) ;
+    });
     // db.close();
 });
-db.close();
 
-// 
-// db.transaction(function (tx) {
-//     tx.query("SELECT ?::int AS foobar", 1, function (rs) {
-//         sys.puts(sys.inspect(rs));
-//     });
-//     tx.prepare("SELECT ?::int AS foobar", function (sth) {
-//         sth.execute(2, function (rs) {
-//             sys.puts(sys.inspect(rs));
-//         });
-//     });
-//     tx.commit();
-// });
+db.transaction(function (tx) {
+    tx.query("SELECT ?::int AS txtest1", 1, function (rs) {
+        sys.puts(sys.inspect(rs));
+    });
+    tx.prepare("SELECT ?::int AS txtest2", function (sth) {
+        sth.execute(2, function (rs) {
+            sys.puts(sys.inspect(rs));
+        });
+    });
+    tx.commit();
+});
+
+db.close();
