@@ -11,6 +11,8 @@ All code is available under the terms of the MIT license, unless otherwise noted
 
 (c) 2010, Tim Caswell, Aurynn Shaw.
 
+Bugs can be reported @ https://public.commandprompt.com/projects/postgres-js
+
 ## Example use
 
 	var sys = require("sys");
