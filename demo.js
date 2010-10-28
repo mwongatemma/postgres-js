@@ -1,24 +1,31 @@
 var sys = require("sys");
 var pg = require("./lib/postgres-pure");
-pg.DEBUG=0;
+// pg.DEBUG=4;
 
-var db = new pg.connect("pgsql://test:12345@localhost:5432/pdxpugtest");
-// db.query("explain analyze select * from pg_class ;", function (rs, tx) {
-//     sys.puts(sys.inspect(rs));
-//     // tx.query("SELECT 2::int as querytest2", function (rs) {
-//     //     sys.puts(sys.inspect(rs));
-//     // });
-// });
+var db = new pg.connect("pgsql://test:12345@localhost:5432/returning_test");
+db.query("SELECT 1::querytest;", function (error, rs, tx) {
+    if (error) {
+        console.log("Error!");
+        sys.puts(error);
+        sys.puts(error.code);
+    }
+    else {
+        sys.puts(sys.inspect(rs));
+    }
+    
+    // tx.query("SELECT 2::int as querytest2", function (rs) {
+    //     sys.puts(sys.inspect(rs));
+    // });
+});
 
-db.prepare("INSERT INTO pdxpug (id) VALUES (?) RETURNING id", function (sth) {
-    sth.execute(1, function(rs) {
+db.prepare("INSERT INTO returning_test (val) VALUES (?) RETURNING id, val", function (sth) {
+    sth.execute("text value", function(e, rs) {
         if (rs === undefined) {
             console.log("No data.");
         }
         else {
             console.log(sys.inspect(rs));
         }
-        
     });
 });
 
