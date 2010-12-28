@@ -4,7 +4,7 @@ pg.DEBUG=0;
 
 var db = new pg.connect("pgsql://test:12345@localhost:5432/template1");
 
-db.prepare("SELECT ?::int AS foobar", function (err, sth, tx) {
+db.prepare("SELECT ?::int AS foobar", function (sth, tx) {
     sth.execute(1, function (err, rs) {
         console.log(eq(rs[0]['foobar'], 1));
         //console.log(sys.inspect(rs));
