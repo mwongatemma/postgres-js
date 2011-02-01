@@ -1,5 +1,5 @@
 {"name": "postgres",
- "version": "0.1.0RC2",
+ "version": "0.1.0",
  "description": "Pure-JavaScript implementation of the Postgres Protocol",
  "homepage": "https://public.commandprompt.com/projects/postgres-js/",
  "author": {
@@ -7,4 +7,7 @@
     "email": "ashaw@commandprompt.com",
  },
  "main": "lib/postgres-pure",
+ "dependencies" :
+   { "strtok" : ">=0.1.1"
+   }
 }
