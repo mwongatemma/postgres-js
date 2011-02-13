@@ -1,10 +1,10 @@
 {"name": "postgres-js",
- "version": "0.1.0",
- "description": "Pure-JavaScript implementation of the Postgres Protocol",
+ "version": "0.1.1",
+ "description": "Pure-JavaScript implementation of the Postgres protocol",
  "homepage": "https://public.commandprompt.com/projects/postgres-js/",
  "author": {
     "name": "Aurynn Shaw",
-    "email": "ashaw@commandprompt.com",
+    "email": "aurynn@gmail.com",
  },
  "main": "lib/postgres-pure",
  "dependencies" :

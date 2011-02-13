@@ -7,7 +7,7 @@ This library allows for the correct handling of server-side prepared queries.
 
 Nested DB calls will be executed in the order of definition. 
 
-All code is available under the terms of the MIT license, unless otherwise noted (md5.js)
+All code is available under the terms of the MIT license
 
 (c) 2010, Tim Caswell, Aurynn Shaw.
 
