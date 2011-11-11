@@ -5,7 +5,7 @@
  "author": "Tim Caswell <tim@creationix.com>",
  "contributors": [ 
     { "name": "Aurynn Shaw","email": "aurynn@gmail.com" },
-    { "name": "Anthony Sekatski","email": "anthony@8protons.com" },
+    { "name": "Anthony Sekatski","email": "anthony@8protons.com" }
  ],
  "main": "lib/postgres-pure",
  "dependencies" :
